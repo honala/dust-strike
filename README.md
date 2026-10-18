@@ -4,6 +4,12 @@
 
 5v5 战术对抗：你是反恐精英（CT），4 个 CT 机器人队友 vs 5 个 T 机器人，先赢 8 回合获胜。购买经济、AK/M4/AWP/USP/Glock、爆头、后坐力、A 大/B 包点、回合制、计分板、击杀信息流、合成音效全部具备。
 
+## 在线试玩
+
+- 🌐 个人站：**https://games.honala.xyz/dust-strike/**
+- 🐙 GitHub Pages：https://honala.github.io/dust-strike/
+- 📦 GitHub 仓库：https://github.com/honala/dust-strike
+
 ![开始界面](docs/screenshots/start.jpg)
 
 ---

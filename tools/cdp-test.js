@@ -26,7 +26,8 @@ async function main() {
 
   const userDataDir = path.join(os.tmpdir(), 'dsh-cdp-' + Date.now());
   fs.mkdirSync(userDataDir, { recursive: true });
-  const url = 'file:///' + (ROOT + '/index.html').replace(/\\/g, '/') + query;
+  const url = /^https?:\/\//i.test(query) ? query
+    : 'file:///' + (ROOT + '/index.html').replace(/\\/g, '/') + query;
 
   const chrome = spawn(CHROME, [
     '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-extensions',
