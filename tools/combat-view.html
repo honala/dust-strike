@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DUST STRIKE · combat viewmodel preview</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b0d10; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1600" height="900"></canvas>
+<!-- Temporary combat self-test tool: software (canvas2d) renderer of the
+     first-person viewmodel using the real js/math.js + js/weapons.js +
+     js/player.js.  Query: ?w=usp|glock|m4a1|ak47|awp|knife &act=idle|walk|
+     crouch|fire|reload|draw|scope &t=seconds-of-sim -->
+<script src="../js/math.js"></script>
+<script src="../js/weapons.js"></script>
+<script src="../js/player.js"></script>
+<script>
+(function () {
+  'use strict';
+  /* ------------------------------ query ------------------------------ */
+  var Q = {};
+  String(location.search || '').replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return;
+    var a = kv.split('=');
+    Q[decodeURIComponent(a[0])] = decodeURIComponent(a[1] || '');
+  });
+  var W = parseInt(Q.cw || '1600', 10) || 1600;
+  var H = parseInt(Q.ch || '900', 10) || 900;
+  var canvas = document.getElementById('c');
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  var ctx = canvas.getContext('2d');
+
+  function fail(msg) {
+    ctx.fillStyle = '#2a0c0c'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#ff7a5c'; ctx.font = '16px Consolas,monospace';
+    ctx.fillText('ERROR: ' + msg, 30, 60);
+  }
+  window.onerror = function (m, src, line, col, err) {
+    fail((err && err.stack) || (m + ' @' + line + ':' + col));
+  };
+
+  try {
+    var CS = window.CS, M = CS.math, V3 = M.V3, M4 = M.M4;
+    if (!M || !CS.weapons || !CS.player) throw new Error('missing scripts (math/weapons/player)');
+
+    /* ------------------------------ query ------------------------------ */
+    var Q = {};
+    String(location.search || '').replace(/^\?/, '').split('&').forEach(function (kv) {
+      if (!kv) return;
+      var a = kv.split('=');
+      Q[decodeURIComponent(a[0])] = decodeURIComponent(a[1] || '');
+    });
+    var wId = Q.w || 'm4a1';
+    var act = Q.act || 'idle';
+    var secs = parseFloat(Q.t || '0.5');
+    if (!(secs > 0)) secs = 0.5;
+    var frames = Math.max(1, Math.round(secs * 60));
+
+    /* ------------------------- world / game stubs ---------------------- */
+    var world = {
+      name: 'Combat Preview',
+      boxes: [],
+      spawns: { ct: [{ pos: [0, 0, -27], yaw: Math.PI }], t: [] },
+      raycast: function () { return null; },
+      los: function () { return true; },
+      moveEntity: function (pos, delta, radius, height) {
+        var np = [pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]];
+        var og = false;
+        if (np[1] <= 0) { np[1] = 0; og = true; }
+        return { pos: np, onGround: og, hitWall: false, hitCeil: false };
+      },
+      render: function () {}
+    };
+    CS.world = world;
+    var game = {
+      world: world, renderer: null, canvas: canvas, bots: [], fx: null, audio: null, hud: null,
+      settings: { sensitivity: 1.0, difficulty: 'normal', volume: 0.0, fov: 90 },
+      input: { keys: {}, mouseDown: false, mouseDX: 0, mouseDY: 0, pressed: {}, locked: true, rightDown: false, rightPressed: false },
+      events: [], emit: function (e) { this.events.push(e); },
+      frozen: false,
+      hud: { isBlockingInput: function () { return false; } },
+      rules: { state: { phase: 'live' } },
+      time: 0, dt: 1 / 60
+    };
+    CS.game = game;
+    var p = CS.player.init(game);
+    game.player = p;
+    p.pos = [0, 0, -27]; p.yaw = Math.PI; p.pitch = 0; p.vel = [0, 0, 0];
+
+    /* --------------------------- weapon / action ----------------------- */
+    if (wId !== 'usp' && wId !== 'glock') {
+      CS.player.equip(game, wId);
+    } else if (wId !== 'usp') {
+      CS.player.equip(game, wId);
+    }
+    p.drawT = 0;
+    p.fireT = 0;
+
+    function step(n) { for (var i = 0; i < n; i++) CS.player.update(game, 1 / 60); }
+
+    if (act === 'walk' || act === 'walkrun' || act === 'crouch') {
+      game.input.keys = { KeyW: true };
+      if (act === 'walk') game.input.keys.ShiftLeft = true;
+      if (act === 'crouch') game.input.keys.ControlLeft = true;
+      step(frames);
+      game.input.keys = {};
+    } else if (act === 'fire') {
+      step(4);
+      p.fireT = 0;
+      game.input.mouseDown = false; step(1);
+      game.input.mouseDown = true;
+      step(1);                 /* guarantee the last frame is a shot frame */
+      step(Math.max(0, Math.round(secs * 60) - 2));
+    } else if (act === 'reload') {
+      var d0 = p.currentDef();
+      if (p.ammo[d0.id]) p.ammo[d0.id].mag = Math.max(1, (d0.mag || 1) - 10);
+      game.input.pressed = { reload: true };
+      step(1);
+      game.input.pressed = {};
+      step(frames);
+    } else if (act === 'draw') {
+      p.drawT = p.currentDef().drawTime || 1;
+      step(frames);
+    } else if (act === 'scope') {
+      if (p.currentDef().id === 'awp') {
+        game.input.rightPressed = true; step(1); game.input.rightPressed = false;
+      }
+      step(frames);
+    } else { /* idle */
+      step(frames);
+    }
+
+    /* ------------------------ software renderer ------------------------ */
+    var fovH = (p.fov || 90) * Math.PI / 180;
+    var eye = p.eye();
+    var camWorld = M4.cameraWorld(eye, p.yaw, p.pitch);
+    var viewM = M4.invert(camWorld);
+    var asp = W / H;
+    /* glcore treats fovDeg as HORIZONTAL fov -> convert to vertical projection */
+    var fovV = 2 * Math.atan(Math.tan(fovH * 0.5) / asp);
+    var f = 1 / Math.tan(fovV * 0.5);
+    var NEAR = 0.05;
+    var faces = [];
+    var boxCount = 0;
+
+    function projectView(v) {
+      var z = -v[2];
+      if (z < NEAR) return null;
+      var nx = (f / asp) * v[0] / z;
+      var ny = f * v[1] / z;
+      return { x: (nx * 0.5 + 0.5) * W, y: (0.5 - ny * 0.5) * H, z: z };
+    }
+
+    var FACE_DEF = [
+      [0, 1, 3, 2], [4, 6, 7, 5],   /* -z, +z */
+      [0, 4, 5, 1], [2, 3, 7, 6],   /* -y, +y */
+      [0, 2, 6, 4], [1, 5, 7, 3]    /* -x, +x */
+    ];
+    var LIGHT = V3.norm([0.42, 0.62, -0.66]);
+
+    function addBox(matrix, tint, isVM) {
+      boxCount++;
+      var wc = [], vc = [];
+      for (var i = 0; i < 8; i++) {
+        var cx = (i & 1) ? 0.5 : -0.5;
+        var cy = (i & 2) ? 0.5 : -0.5;
+        var cz = (i & 4) ? 0.5 : -0.5;
+        var wv = V3.transformMat4([cx, cy, cz, 1], matrix);
+        var vv = V3.transformMat4([wv[0], wv[1], wv[2], 1], viewM);
+        wc.push(wv); vc.push(vv);
+      }
+      for (var fi = 0; fi < 6; fi++) {
+        var id = FACE_DEF[fi];
+        var a = vc[id[0]], b = vc[id[1]], c = vc[id[2]], dd = vc[id[3]];
+        var ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+        var wx = c[0] - a[0], wy = c[1] - a[1], wz = c[2] - a[2];
+        var nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+        var nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (nl < 1e-9) continue;
+        nx /= nl; ny /= nl; nz /= nl;
+        var ccx = (a[0] + c[0]) * 0.5, ccy = (a[1] + c[1]) * 0.5, ccz = (a[2] + c[2]) * 0.5;
+        if (nx * ccx + ny * ccy + nz * ccz >= 0) continue;   /* backface */
+        var p0 = projectView(a), p1 = projectView(b), p2 = projectView(c), p3 = projectView(dd);
+        if (!p0 || !p1 || !p2 || !p3) continue;
+        var shade = 0.52 + 0.48 * Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+        var r = Math.round(255 * Math.min(1, tint[0] * shade));
+        var g = Math.round(255 * Math.min(1, tint[1] * shade));
+        var bl = Math.round(255 * Math.min(1, tint[2] * shade));
+        faces.push({
+          depth: -(ccz * 0.25 + a[2] * 0.25 + c[2] * 0.5),
+          pts: [p0, p1, p2, p3],
+          fill: 'rgb(' + r + ',' + g + ',' + bl + ')',
+          isVM: !!isVM
+        });
+      }
+    }
+
+    /* backdrop */
+    var sky = ctx.createLinearGradient(0, 0, 0, H * 0.55);
+    sky.addColorStop(0, '#7e97ad');
+    sky.addColorStop(1, '#cfc09a');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H * 0.55);
+    var gnd = ctx.createLinearGradient(0, H * 0.55, 0, H);
+    gnd.addColorStop(0, '#c2ab7d');
+    gnd.addColorStop(1, '#8f7a54');
+    ctx.fillStyle = gnd;
+    ctx.fillRect(0, H * 0.55, W, H * 0.45);
+
+    /* a few world boxes for depth context (matrix = T * S, unit cube) */
+    function worldBox(x, y, z, sx, sy, sz, tint) {
+      var m = M4.multiply(M4.translation(x, y, z), M4.scaling(sx, sy, sz));
+      addBox(m, tint, false);
+    }
+    worldBox(0, -0.5, -20, 80, 1, 80, [0.66, 0.54, 0.34]);       /* floor */
+    worldBox(0, 3.0, -9, 44, 6, 1, [0.62, 0.52, 0.36]);          /* far wall */
+    worldBox(-4.5, 0.6, -18, 1.4, 1.2, 1.4, [0.52, 0.36, 0.18]); /* crates */
+    worldBox(4.2, 0.5, -16, 1.1, 1.0, 1.1, [0.46, 0.34, 0.2]);
+    worldBox(2.0, 1.4, -20, 0.6, 2.8, 0.6, [0.5, 0.35, 0.17]);
+
+    /* viewmodel (real player.renderViewmodel output) */
+    var vmRenderer = {
+      camera: {},
+      drawBox: function (tex, matrix, tint, uv) {
+        addBox(matrix, tint || [1, 1, 1], true);
+      }
+    };
+    var vmBoxes = 0;
+    if (typeof p.renderViewmodel === 'function' && p.alive) {
+      var before = boxCount;
+      p.renderViewmodel(vmRenderer);
+      vmBoxes = boxCount - before;
+    }
+
+    /* painter's sort: far first */
+    faces.sort(function (a, b) { return a.depth - b.depth; });
+    for (var i = 0; i < faces.length; i++) {
+      var fc = faces[i];
+      ctx.beginPath();
+      ctx.moveTo(fc.pts[0].x, fc.pts[0].y);
+      ctx.lineTo(fc.pts[1].x, fc.pts[1].y);
+      ctx.lineTo(fc.pts[2].x, fc.pts[2].y);
+      ctx.lineTo(fc.pts[3].x, fc.pts[3].y);
+      ctx.closePath();
+      ctx.fillStyle = fc.fill;
+      ctx.fill();
+      if (fc.isVM) {
+        ctx.strokeStyle = 'rgba(0,0,0,0.30)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+
+    /* center crosshair reference */
+    ctx.strokeStyle = 'rgba(120,255,140,0.85)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 12, H / 2); ctx.lineTo(W / 2 - 4, H / 2);
+    ctx.moveTo(W / 2 + 4, H / 2); ctx.lineTo(W / 2 + 12, H / 2);
+    ctx.moveTo(W / 2, H / 2 - 12); ctx.lineTo(W / 2, H / 2 - 4);
+    ctx.moveTo(W / 2, H / 2 + 4); ctx.lineTo(W / 2, H / 2 + 12);
+    ctx.stroke();
+
+    /* debug text */
+    var def = p.currentDef ? p.currentDef() : null;
+    var am = p.ammo && def ? p.ammo[def.id] : null;
+    ctx.font = '15px Consolas,monospace';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(16, 16, 520, 118);
+    ctx.fillStyle = '#e8e2d4';
+    var lines = [
+      'weapon=' + (def ? def.id + ' (' + def.name + ')' : '?') + '   action=' + act + '   frames=' + frames,
+      'viewmodel boxes=' + vmBoxes + '   scoped=' + !!p.scoped + '   fov=' + (p.fov || 0).toFixed(1),
+      'drawT=' + (p.drawT || 0).toFixed(2) + '   reloading=' + !!p.reloading + '   ammo=' + (am ? am.mag + '/' + am.reserve : '-'),
+      'pitch=' + (p.pitch * 180 / Math.PI).toFixed(2) + 'deg  kick=' + (p.vmKick || 0).toFixed(3) + '  spread=' + (p.spread || 0).toFixed(4)
+    ];
+    for (var li = 0; li < lines.length; li++) ctx.fillText(lines[li], 28, 42 + li * 24);
+
+    window.__VIEW_INFO__ = {
+      weapon: def ? def.id : null, act: act, vmBoxes: vmBoxes,
+      totalBoxes: boxCount, scoped: !!p.scoped, fov: p.fov,
+      pitchDeg: p.pitch * 180 / Math.PI, vmKick: p.vmKick,
+      ammo: am ? { mag: am.mag, reserve: am.reserve } : null,
+      drawT: p.drawT, reloading: p.reloading, alive: p.alive
+    };
+  } catch (e) {
+    fail((e && e.stack) || String(e));
+  }
+})();
+</script>
+</body>
+</html>

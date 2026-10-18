@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>BOTS VIEW — model / AI visual check</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #0b0d10; }
+  #cv { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #hud { position: fixed; left: 14px; top: 12px; color: #e8e2d4; font: 13px/1.5 "Segoe UI", sans-serif;
+         background: rgba(10,12,16,.62); padding: 8px 12px; border-radius: 6px; pointer-events: none; }
+  #err { position: fixed; left: 14px; bottom: 12px; max-width: 90vw; color: #ff7a5c;
+         font: 12px/1.4 Consolas, monospace; white-space: pre-wrap; }
+  #stats { position: fixed; right: 14px; top: 12px; color: #9fe0a8; font: 12px/1.45 Consolas, monospace;
+           background: rgba(10,12,16,.62); padding: 8px 12px; border-radius: 6px; pointer-events: none; max-width: 420px; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hud"><b>DUST STRIKE — bots model check</b><br>?mode=lineup (default) | ?mode=live</div>
+<div id="err"></div>
+<div id="stats"></div>
+
+<script src="../js/math.js"></script>
+<script src="../js/glcore.js"></script>
+<script src="../js/fx.js"></script>
+<script src="../js/weapons.js"></script>
+<script src="../js/world.js"></script>
+<script src="../js/bots.js"></script>
+<script>
+(function () {
+  'use strict';
+  var M = CS.math;
+  var errEl = document.getElementById('err');
+  var statsEl = document.getElementById('stats');
+  var errors = [];
+  window.addEventListener('error', function (e) {
+    errors.push(String(e.message || e.error || e));
+    errEl.textContent = errors.join('\n');
+  });
+  function fail(msg) { errors.push(msg); errEl.textContent = errors.join('\n'); console.error(msg); }
+
+  var params = new URLSearchParams(location.search);
+  var mode = params.get('mode') || 'lineup';
+
+  /* ------------------------ world: real if available -------------------- */
+  var hasRealWorld = !!(CS.world && typeof CS.world.init === 'function');
+  var world = CS.world;
+  if (!hasRealWorld) {
+  var SPAWNS = { ct: [], t: [] };
+  for (var i = 0; i < 5; i++) {
+    SPAWNS.ct.push({ pos: [-6 + i * 3, 0, -24], yaw: 0 });
+    SPAWNS.t.push({ pos: [-6 + i * 3, 0, 24], yaw: Math.PI });
+  }
+  var ZONES = {
+    tSpawn: [0, 24], ctSpawn: [0, -24], mid: [0, 0],
+    siteA: [-16, -6], siteB: [16, -4], longA: [-22, 10], longB: [22, 10], tunnels: [-8, 12]
+  };
+  var world = {
+    name: 'Dust Strike',
+    boxes: [],
+    spawns: SPAWNS,
+    sites: { A: { center: [-16, -6], radius: 5 }, B: { center: [16, -4], radius: 5 } },
+    zones: (function () { var z = {}; for (var k in ZONES) z[k] = { points: [ZONES[k].slice()] }; return z; })(),
+    moveEntity: function (pos, delta) {
+      var x = M.clamp(pos[0] + delta[0], -30, 30);
+      var z = M.clamp(pos[2] + delta[2], -32, 32);
+      var y = pos[1] + delta[1];
+      var onGround = y <= 0.0001;
+      if (onGround) y = 0;
+      return { pos: [x, y, z], onGround: onGround, hitWall: false, hitCeil: false };
+    },
+    raycast: function () { return null; },
+    los: function () { return true; },
+    render: function (r) {
+      var M4 = CS.math.M4;
+      // sand ground
+      r.drawBox('sandfloor', M4.multiply(M4.translation(0, -0.5, 0), M4.scaling(80, 1, 80)), [1, 1, 1], 22);
+      // outer walls
+      r.drawBox('wall', M4.multiply(M4.translation(0, 3, -33), M4.scaling(76, 6, 1.2)), [1, 0.96, 0.88], 8);
+      r.drawBox('wall', M4.multiply(M4.translation(0, 3, 33), M4.scaling(76, 6, 1.2)), [1, 0.96, 0.88], 8);
+      r.drawBox('wall2', M4.multiply(M4.translation(-33, 3, 0), M4.scaling(1.2, 6, 66)), [1, 0.96, 0.88], 8);
+      r.drawBox('wall2', M4.multiply(M4.translation(33, 3, 0), M4.scaling(1.2, 6, 66)), [1, 0.96, 0.88], 8);
+      // a few crates for depth/reference
+      var crates = [[-10, 1, -10, 2], [10, 1, -8, 2], [-4, 0.75, 12, 1.5], [6, 1, 14, 2], [0, 1.5, -18, 3]];
+      for (var c = 0; c < crates.length; c++) {
+        var q = crates[c];
+        r.drawBox('crate', M4.multiply(M4.translation(q[0], q[1], q[2]), M4.scaling(q[3], q[1] * 2, q[3])), [1, 1, 1], 2);
+      }
+    }
+  };
+  world.nav = {
+    cell: 0.75,
+    isWalkable: function () { return true; },
+    findPath: function (sx, sz, tx, tz) {
+      var pts = [];
+      var n = Math.max(1, Math.ceil(Math.hypot(tx - sx, tz - sz) / 6));
+      for (var i = 1; i < n; i++) pts.push([sx + (tx - sx) * i / n, sz + (tz - sz) * i / n]);
+      pts.push([tx, tz]);
+      return pts;
+    },
+    nearestWalkable: function (x, z) { return [x, z]; },
+    randomPointInZone: function (name) {
+      var b = ZONES[name] || [0, 0];
+      return [b[0] + (Math.random() - 0.5) * 3, b[1] + (Math.random() - 0.5) * 3];
+    },
+    randomPoint: function () { return [(Math.random() - 0.5) * 50, (Math.random() - 0.5) * 50]; }
+  };
+  CS.world = world;
+  } /* end stub world */
+
+  /* ------------------------------ renderer ------------------------------ */
+  var canvas = document.getElementById('cv');
+  var renderer = CS.gl.init(canvas);
+  if (!renderer) { fail('CS.gl.init failed'); return; }
+  try { CS.fx.init(renderer); } catch (e) { fail('fx.init: ' + e.message); }
+  renderer.resize();
+
+  /* ------------------------------- game -------------------------------- */
+  function makePlayer(x, z) {
+    return {
+      team: 'ct', name: '你', pos: [x, 0, z], vel: [0, 0, 0], yaw: 0, pitch: 0,
+      health: 100, armor: 100, alive: true, kills: 0, deaths: 0,
+      eye: function () { return [this.pos[0], this.pos[1] + 1.62, this.pos[2]]; },
+      rayTest: function (origin, dir, maxDist) {
+        if (!this.alive) return null;
+        var boxes = [
+          { min: [this.pos[0] - 0.26, 1.50, this.pos[2] - 0.26], max: [this.pos[0] + 0.26, 1.84, this.pos[2] + 0.26], zone: 'head' },
+          { min: [this.pos[0] - 0.30, 0.82, this.pos[2] - 0.30], max: [this.pos[0] + 0.30, 1.50, this.pos[2] + 0.30], zone: 'body' },
+          { min: [this.pos[0] - 0.26, 0.02, this.pos[2] - 0.26], max: [this.pos[0] + 0.26, 0.82, this.pos[2] + 0.26], zone: 'legs' }
+        ];
+        var best = null;
+        for (var i = 0; i < boxes.length; i++) {
+          var t = CS.math.rayAABB(origin, dir, boxes[i].min, boxes[i].max, maxDist || 200);
+          if (t >= 0 && (!best || t < best.dist)) {
+            best = { dist: t, point: [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t], zone: boxes[i].zone };
+          }
+        }
+        return best;
+      },
+      onKilled: function () { this.alive = false; }
+    };
+  }
+
+  var game = {
+    renderer: renderer,
+    world: world,
+    player: makePlayer(0, 8),
+    bots: [],
+    settings: { difficulty: 'normal', fov: 90, volume: 0.8, sensitivity: 1 },
+    input: { keys: {}, pressed: {}, mouseDown: false, locked: false },
+    events: [],
+    rules: null,
+    time: 0, frame: 0, frozen: false,
+    emit: function (e) { this.events.push(e); }
+  };
+
+  if (hasRealWorld) {
+    try {
+      world = CS.world.init(game);
+      game.world = world;
+    } catch (e) {
+      fail('world.init: ' + (e && e.message));
+      world = CS.world;
+    }
+  }
+
+  var bots = CS.bots.init(game);
+  if (!bots || bots.length !== 9) { fail('CS.bots.init returned ' + (bots && bots.length)); return; }
+
+  /* --------------------------- pose the lineup -------------------------- */
+  if (mode === 'lineup' || mode === 'closeup') {
+    game.frozen = true; // freeze AI, we pose manually
+    var ctBots = bots.filter(function (b) { return b.team === 'ct'; });
+    var tBots = bots.filter(function (b) { return b.team === 't'; });
+    if (mode === 'closeup') {
+      // 2 CT + 2 T close to the camera, facing it, to inspect the box humanoid
+      var close = [ctBots[0], ctBots[1], tBots[0], tBots[1]];
+      var xs = [-2.1, -0.7, 0.7, 2.1];
+      for (var q = 0; q < close.length; q++) {
+        close[q].pos = [xs[q], 0, 1.6];
+        close[q].yaw = Math.PI + (q === 3 ? 0.35 : 0); // last one slightly turned
+        close[q].moveSpeed = q === 1 ? 2.2 : 0;
+        close[q].walkPhase = 1.1;
+        close[q].alive = true;
+      }
+      for (var q2 = 0; q2 < bots.length; q2++) {
+        if (close.indexOf(bots[q2]) >= 0) continue;
+        bots[q2].pos = [20 + q2, 0, 20];
+      }
+      // a fallen body in the middle distance
+      tBots[2].pos = [2.2, 0, -1.5];
+      tBots[2].onKilled(null, 'ak47', 'body');
+      tBots[2].deathT = 1.1;
+    } else {
+      for (var c = 0; c < ctBots.length; c++) {
+        var cb = ctBots[c];
+        cb.pos = [-5.1 + c * 3.4, 0, 2.2];
+        cb.yaw = Math.PI;             // face the camera
+        cb.moveSpeed = c === 1 ? 3.2 : (c === 2 ? 4.4 : 0);
+        cb.walkPhase = c * 1.15;
+        cb.alive = true;
+      }
+      for (var t = 0; t < tBots.length; t++) {
+        var tb = tBots[t];
+        tb.pos = [-6.8 + t * 3.4, 0, -2.4];
+        tb.yaw = Math.PI;
+        tb.moveSpeed = t === 1 ? 4.2 : (t === 3 ? 2.4 : 0);
+        tb.walkPhase = 0.7 + t * 1.3;
+        tb.alive = true;
+      }
+      // one corpse to check fall/fade pose: half-fallen T and nearly gone CT
+      tBots[4].onKilled(null, 'ak47', 'head');
+      tBots[4].pos = [6.8, 0, -2.4];
+      tBots[4].deathT = 0.35;
+      ctBots[3].onKilled(null, 'm4a1', 'body');
+      ctBots[3].pos = [5.1, 0, 2.2];
+      ctBots[3].deathT = 2.2;
+    }
+  }
+
+  /* ------------------------ real-map studio pose ------------------------ */
+  if (mode === 'realmap' && hasRealWorld) {
+    game.frozen = true;
+    var tBots2 = bots.filter(function (b) { return b.team === 't'; });
+    var ctBots2 = bots.filter(function (b) { return b.team === 'ct'; });
+    var tz = 0;
+    for (var s2 = 0; s2 < world.spawns.t.length; s2++) tz += world.spawns.t[s2].pos[2];
+    tz /= world.spawns.t.length;
+    var rowZ = tz - 3.6;
+    var spot = (function (x, z) {
+      if (world.nav && typeof world.nav.nearestWalkable === 'function') {
+        var p = world.nav.nearestWalkable(x, z);
+        if (p && isFinite(p[0])) return [p[0], p[1]];
+      }
+      return [x, z];
+    });
+    for (var c2 = 0; c2 < ctBots2.length; c2++) {
+      var cb2 = ctBots2[c2];
+      var sp2 = spot(-4.8 + c2 * 3.2, rowZ);
+      cb2.pos = [sp2[0], 0, sp2[1]];
+      cb2.yaw = 0;                       // faces -Z, i.e. the camera
+      cb2.moveSpeed = c2 === 1 ? 3.4 : (c2 === 2 ? 4.4 : 0);
+      cb2.walkPhase = c2 * 1.2;
+      cb2.alive = true;
+    }
+    for (var t2 = 0; t2 < tBots2.length; t2++) {
+      var tb2 = tBots2[t2];
+      tb2.yaw = 0;
+      tb2.moveSpeed = t2 === 1 ? 4.2 : (t2 === 3 ? 2.0 : 0);
+      tb2.walkPhase = 0.6 + t2 * 1.4;
+      tb2.alive = true;
+    }
+    // corpses for fall/fade verification
+    tBots2[4].onKilled(null, 'ak47', 'head');
+    tBots2[4].pos = [spot(6.2, rowZ)[0], 0, spot(6.2, rowZ)[1]];
+    tBots2[4].deathT = 0.4;
+    ctBots2[3].onKilled(null, 'm4a1', 'body');
+    var cp2 = spot(-7.4, rowZ);
+    ctBots2[3].pos = [cp2[0], 0, cp2[1]];
+    ctBots2[3].deathT = 2.4;
+    world.realmapRowZ = rowZ;
+  }
+
+  /* ------------------------------ main loop ----------------------------- */
+  var last = 0, t0 = performance.now();
+  var camEye = [0, 2.55, 10.2];
+  var camYaw = 0, camPitch = -0.14;
+  if (mode === 'closeup') {
+    camEye = [0, 1.72, 5.4];
+    camPitch = -0.06;
+  }
+  if (mode === 'live') {
+    game.player.pos = [0, 0, 6];
+    camEye = [0, 1.62, 12];
+    camPitch = -0.03;
+  }
+  if (mode === 'realmap' && hasRealWorld && world.realmapRowZ !== undefined) {
+    camEye = [0, 2.15, world.realmapRowZ - 6.2];
+    camYaw = Math.PI;                    // look +Z at the bot rows
+    camPitch = -0.10;
+    game.player.pos = [camEye[0], 0, camEye[2]];
+  }
+
+  function loop(now) {
+    requestAnimationFrame(loop);
+    var dt = last ? (now - last) / 1000 : 0.016;
+    last = now;
+    if (!(dt > 0)) dt = 0.016;
+    if (dt > 0.05) dt = 0.05;
+    game.time += dt;
+
+    if (mode === 'live') {
+      CS.bots.update(game, dt);
+      try { CS.fx.update(dt); } catch (e) { fail('fx.update: ' + e.message); }
+      game.events.length = 0;
+      var p = game.player;
+      camEye = [p.pos[0], p.pos[1] + 1.62, p.pos[2]];
+      camYaw = 0;
+      camPitch = p.pitch || 0;
+    }
+
+    renderer.resize();
+    renderer.setCamera(camEye, camYaw, camPitch, 78);
+    renderer.beginFrame();
+    try { world.render(renderer); } catch (e) { fail('world.render: ' + e.message); }
+    try { CS.bots.render(game); } catch (e) { fail('bots.render: ' + e.message); }
+    try { CS.fx.render(renderer); } catch (e) { fail('fx.render: ' + e.message); }
+    renderer.endFrame();
+
+    if (game.frame % 10 === 0) {
+      var st = CS.bots.debugState();
+      var extra = '';
+      if (mode === 'live') {
+        var shots = 0, hits = 0;
+        for (var k = 0; k < game.bots.length; k++) if (game.bots[k].target) shots++;
+        extra = ' targets=' + shots + ' playerHp=' + Math.round(game.player.health);
+      }
+      statsEl.textContent = 'frame=' + game.frame + ' dt=' + (dt * 1000).toFixed(1) + 'ms\n' +
+        JSON.stringify(st) + extra + '\n' +
+        'draws=' + (renderer.stats ? renderer.stats.draws : '?') +
+        ' tris=' + (renderer.stats ? renderer.stats.tris : '?') +
+        ' errors=' + errors.length;
+    }
+    game.frame++;
+  }
+  requestAnimationFrame(loop);
+
+  // expose for headless DOM dump
+  window.__BOTS_VIEW__ = { game: game, mode: mode, errors: errors };
+})();
+</script>
+</body>
+</html>

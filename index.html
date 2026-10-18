@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DUST STRIKE · 网页版 CSGO</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0b0d10; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; color: #e8e2d4; user-select: none; }
+  #game-canvas { position: fixed; inset: 0; display: block; width: 100vw; height: 100vh; outline: none; background: #1a1814; }
+  #hud-root { position: fixed; inset: 0; pointer-events: none; z-index: 10; overflow: hidden; }
+  #boot {
+    position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px;
+    background: radial-gradient(circle at 50% 40%, #2a2418, #0b0d10 75%);
+    color: #c9a45c; letter-spacing: 4px; font-size: 14px; transition: opacity .35s ease;
+  }
+  #boot .title { font-size: 30px; letter-spacing: 10px; color: #e8c877; font-weight: 700; }
+  #boot .err { color: #e0604a; font-size: 13px; letter-spacing: 1px; max-width: 520px; text-align: center; line-height: 1.6; }
+  #boot .bar { width: 220px; height: 2px; background: #3a3122; overflow: hidden; }
+  #boot .bar i { display: block; width: 40%; height: 100%; background: #e8c877; animation: bootslide 1.1s infinite ease-in-out; }
+  @keyframes bootslide { 0% { transform: translateX(-100%);} 100% { transform: translateX(350%);} }
+</style>
+</head>
+<body>
+<canvas id="game-canvas" tabindex="0"></canvas>
+<div id="hud-root"></div>
+<div id="boot">
+  <div class="title">DUST STRIKE</div>
+  <div class="bar"><i></i></div>
+  <div class="sub">正在生成沙漠战场…</div>
+</div>
+
+<!-- load order is defined in CONTRACT.md, do not reorder -->
+<script src="js/math.js"></script>
+<script src="js/glcore.js"></script>
+<script src="js/fx.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/world.js"></script>
+<script src="js/weapons.js"></script>
+<script src="js/player.js"></script>
+<script src="js/bots.js"></script>
+<script src="js/hud.js"></script>
+<script src="js/rules.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

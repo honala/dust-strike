@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DUST STRIKE · combat viewmodel (real WebGL)</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b0d10; overflow: hidden; }
+  #game-canvas { display: block; width: 1600px; height: 900px; }
+  #info { position: fixed; left: 12px; top: 8px; color: #dfffe0; font: 13px Consolas,monospace;
+          background: rgba(0,0,0,.55); padding: 6px 10px; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="game-canvas"></canvas>
+<div id="info">loading</div>
+<!-- Temporary combat self-test tool: renders the real js/player.js viewmodel
+     with the real js/glcore.js renderer (same projection as the game).
+     Query: ?w=usp|glock|m4a1|ak47|awp|knife &act=idle|walk|fire|reload|draw|scope|side &t=sec -->
+<script src="../js/math.js"></script>
+<script src="../js/glcore.js"></script>
+<script src="../js/weapons.js"></script>
+<script src="../js/player.js"></script>
+<script>
+(function () {
+  'use strict';
+  var info = document.getElementById('info');
+  function fail(msg) {
+    info.style.color = '#ff8a6a';
+    info.textContent = 'ERROR: ' + msg;
+    document.title = 'COMBAT VIEW ERROR';
+    window.__VIEW_ERROR__ = String(msg);
+  }
+  window.addEventListener('error', function (ev) {
+    fail((ev.error && ev.error.stack) || ev.message || 'unknown error');
+  });
+
+  try {
+    var CS = window.CS, M = CS.math;
+    if (!M || !CS.gl || !CS.weapons || !CS.player) throw new Error('missing scripts');
+
+    var Q = {};
+    String(location.search || '').replace(/^\?/, '').split('&').forEach(function (kv) {
+      if (!kv) return;
+      var a = kv.split('=');
+      Q[decodeURIComponent(a[0])] = decodeURIComponent(a[1] || '');
+    });
+    var wId = Q.w || 'm4a1';
+    var act = Q.act || 'idle';
+    var secs = parseFloat(Q.t || '0.5');
+    if (!(secs > 0)) secs = 0.5;
+    var frames = Math.max(1, Math.round(secs * 60));
+
+    var canvas = document.getElementById('game-canvas');
+    var CW = parseInt(Q.cw || '1600', 10) || 1600;
+    var CH = parseInt(Q.ch || '900', 10) || 900;
+    canvas.style.width = CW + 'px';
+    canvas.style.height = CH + 'px';
+    var renderer = CS.gl.init(canvas);
+    if (!renderer) throw new Error('WebGL init failed');
+    renderer.resize();
+
+    /* ------------------------- simple test world ------------------------ */
+    var boxes = [
+      /* floor / walls / crates around the CT spawn, enough for depth cues */
+      { x: 0, y: -0.5, z: -20, sx: 80, sy: 1, sz: 80, tex: 'sandfloor', tint: [1, 1, 1] },
+      { x: 0, y: 3, z: -8, sx: 46, sy: 6, sz: 1, tex: 'wall', tint: [1, 1, 1] },
+      { x: -14, y: 3, z: -20, sx: 1, sy: 6, sz: 22, tex: 'wall2', tint: [1, 1, 1] },
+      { x: 14, y: 3, z: -20, sx: 1, sy: 6, sz: 22, tex: 'wall2', tint: [1, 1, 1] },
+      { x: -4.5, y: 0.6, z: -18, sx: 1.4, sy: 1.2, sz: 1.4, tex: 'crate', tint: [1, 1, 1] },
+      { x: 4.2, y: 0.5, z: -16, sx: 1.1, sy: 1.0, sz: 1.1, tex: 'crate', tint: [1, 1, 1] },
+      { x: 2.0, y: 1.4, z: -20, sx: 0.6, sy: 2.8, sz: 0.6, tex: 'concrete', tint: [1, 1, 1] }
+    ];
+    var world = {
+      name: 'Combat WebGL Preview',
+      boxes: [],
+      spawns: { ct: [{ pos: [0, 0, -27], yaw: Math.PI }], t: [] },
+      raycast: function () { return null; },
+      los: function () { return true; },
+      moveEntity: function (pos, delta) {
+        var np = [pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]];
+        var og = false;
+        if (np[1] <= 0) { np[1] = 0; og = true; }
+        return { pos: np, onGround: og, hitWall: false, hitCeil: false };
+      },
+      render: function (r) {
+        for (var i = 0; i < boxes.length; i++) {
+          var b = boxes[i];
+          var m = M.M4.multiply(M.M4.translation(b.x, b.y, b.z), M.M4.scaling(b.sx, b.sy, b.sz));
+          r.drawBox(b.tex, m, b.tint, 1);
+        }
+      }
+    };
+    CS.world = world;
+
+    var game = {
+      canvas: canvas, renderer: renderer, world: world, bots: [], fx: null, audio: null, hud: null,
+      settings: { sensitivity: 1.0, difficulty: 'normal', volume: 0, fov: 90 },
+      input: { keys: {}, mouseDown: false, mouseDX: 0, mouseDY: 0, pressed: {}, locked: true, rightDown: false, rightPressed: false },
+      events: [], emit: function (e) { this.events.push(e); },
+      frozen: false,
+      hud: { isBlockingInput: function () { return false; } },
+      rules: { state: { phase: 'live' } },
+      time: 0, dt: 1 / 60
+    };
+    CS.game = game;
+    var p = CS.player.init(game);
+    game.player = p;
+    p.pos = [0, 0, -27]; p.yaw = Math.PI; p.pitch = 0; p.vel = [0, 0, 0];
+
+    if (wId !== 'usp') CS.player.equip(game, wId);
+    p.drawT = 0; p.fireT = 0;
+
+    function step(n) { for (var i = 0; i < n; i++) CS.player.update(game, 1 / 60); }
+
+    if (act === 'walk' || act === 'walkrun' || act === 'crouch') {
+      game.input.keys = { KeyW: true };
+      if (act === 'walk') game.input.keys.ShiftLeft = true;
+      if (act === 'crouch') game.input.keys.ControlLeft = true;
+      step(frames);
+      game.input.keys = {};
+    } else if (act === 'fire') {
+      step(4);
+      game.input.mouseDown = false; step(1);
+      game.input.mouseDown = true; step(1);
+      step(Math.max(0, frames - 2));
+    } else if (act === 'reload') {
+      var d0 = p.currentDef();
+      if (p.ammo[d0.id]) p.ammo[d0.id].mag = Math.max(1, (d0.mag || 1) - 10);
+      game.input.pressed = { reload: true };
+      step(1);
+      game.input.pressed = {};
+      step(frames);
+    } else if (act === 'draw') {
+      p.drawT = p.currentDef().drawTime || 1;
+      step(frames);
+    } else if (act === 'scope') {
+      if (p.currentDef().id === 'awp') {
+        game.input.rightPressed = true; step(1); game.input.rightPressed = false;
+      }
+      step(frames);
+    } else {
+      step(frames);
+    }
+
+    /* camera: exactly what main.js does; act=side inspects the model from a
+       camera beside the player (the gun world matrix still uses player camera) */
+    var camYaw = p.yaw, camPitch = p.pitch, camEye = p.eye().slice();
+    if (act === 'side') {
+      var e0 = p.eye();
+      var fwd0 = M.cameraForward(p.yaw, 0);
+      var right0 = M.cameraRight(p.yaw);
+      var center = [e0[0] + fwd0[0] * 0.85 + right0[0] * 0.20,
+                    e0[1] - 0.16,
+                    e0[2] + fwd0[2] * 0.85 + right0[2] * 0.20];
+      camEye = [center[0] + right0[0] * 0.95 - fwd0[0] * 0.08,
+                center[1] + 0.30,
+                center[2] + right0[2] * 0.95 - fwd0[2] * 0.08];
+      var dv = [center[0] - camEye[0], center[1] - camEye[1], center[2] - camEye[2]];
+      var dvl = Math.sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]) || 1;
+      camYaw = Math.atan2(dv[0], -dv[2]);
+      camPitch = Math.asin(Math.max(-1, Math.min(1, dv[1] / dvl)));
+    }
+    if (act === 'low' || act === 'high') {
+      camPitch = (act === 'low' ? -0.5 : 0.45);
+    }
+
+    function draw() {
+      renderer.resize();
+      renderer.setCamera(camEye, camYaw, camPitch, p.fov || 90);
+      renderer.beginFrame();
+      world.render(renderer);
+      if (p.alive) p.renderViewmodel(renderer);
+      renderer.endFrame();
+      var def = p.currentDef ? p.currentDef() : null;
+      var am = p.ammo && def ? p.ammo[def.id] : null;
+      info.textContent = 'weapon=' + (def ? def.id : '?') + ' act=' + act +
+        ' fov=' + (p.fov || 0).toFixed(1) +
+        ' vmBoxes=' + (p.vmDebugCount || '?') +
+        ' drawT=' + (p.drawT || 0).toFixed(2) +
+        ' reloading=' + !!p.reloading +
+        ' scoped=' + !!p.scoped +
+        ' ammo=' + (am ? am.mag + '/' + am.reserve : '-') +
+        ' kick=' + (p.vmKick || 0).toFixed(3);
+      window.__VIEW_INFO__ = {
+        weapon: def ? def.id : null, act: act, fov: p.fov, alive: p.alive,
+        scoped: !!p.scoped, drawT: p.drawT, reloading: p.reloading,
+        ammo: am ? { mag: am.mag, reserve: am.reserve } : null,
+        stats: renderer.stats || null
+      };
+    }
+
+    /* keep rendering so the compositor definitely presents a frame */
+    var t0 = 0;
+    function loop() {
+      t0 += 1 / 60;
+      draw();
+      if (t0 < 4) requestAnimationFrame(loop);
+    }
+    draw();
+    requestAnimationFrame(loop);
+  } catch (e) {
+    fail((e && e.stack) || String(e));
+  }
+})();
+</script>
+</body>
+</html>

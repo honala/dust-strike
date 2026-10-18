@@ -1,0 +1,14 @@
+# local generated artifacts (not part of the project)
+shots/
+tools/*.png
+tools/*.jpg
+tools/*.jpeg
+tools/*.dom.html
+tools/*.err.txt
+tools/*.json
+tools/*.log
+tools/*.txt
+__pycache__/
+*.zip
+.DS_Store
+Thumbs.db

@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DUST STRIKE · HUD test</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+  body {
+    font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(ellipse at 50% 34%, rgba(214,178,116,.9) 0%, rgba(150,117,72,.85) 26%, rgba(74,58,38,.95) 58%, #171310 100%);
+  }
+  /* fake 3D world behind the HUD (only used by this self-test page) */
+  #fake-world { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+  #fake-world .horizon {
+    position: absolute; left: 0; right: 0; top: 46%; height: 1px;
+    background: rgba(255, 226, 170, .35);
+    box-shadow: 0 0 80px 25px rgba(255, 220, 160, .18);
+  }
+  #fake-world .box {
+    position: absolute; background: linear-gradient(180deg, #8a6f47, #4a3a24);
+    border: 1px solid rgba(0,0,0,.35); box-shadow: inset 0 0 40px rgba(0,0,0,.3);
+  }
+  #fake-world .b1 { left: 6%; top: 52%; width: 16%; height: 26%; transform: skewY(4deg); }
+  #fake-world .b2 { right: 8%; top: 55%; width: 20%; height: 22%; transform: skewY(-5deg); }
+  #fake-world .b3 { left: 38%; top: 49%; width: 11%; height: 16%; transform: skewY(2deg); }
+  #fake-world .b4 { right: 30%; top: 47%; width: 8%; height: 12%; transform: skewY(-2deg); }
+  #hud-root { position: fixed; inset: 0; pointer-events: none; z-index: 10; overflow: hidden; }
+  #__selfcheck { position: fixed; left: 0; top: 0; display: none; }
+  #dbg {
+    position: fixed; left: 8px; top: 8px; z-index: 999; display: none;
+    max-width: 1500px; padding: 8px 10px; color: #9fe; background: rgba(0,0,0,.75);
+    font: 11px/1.45 Consolas, monospace; white-space: pre-wrap; word-break: break-all;
+    border: 1px solid #234; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="fake-world">
+  <div class="horizon"></div>
+  <div class="box b1"></div><div class="box b2"></div><div class="box b3"></div><div class="box b4"></div>
+</div>
+<div id="hud-root"></div>
+<pre id="__selfcheck"></pre>
+<div id="dbg"></div>
+
+<script src="../js/audio.js"></script>
+<script src="../js/hud.js"></script>
+<script>
+/* =========================================================================
+ * tools/test-hud.html — standalone HUD/audio self-test page.
+ * It creates a stub `game` object shaped exactly like CONTRACT.md §14 and
+ * exercises CS.hud in several scenarios. Nothing here is shipped.
+ *
+ * URL params:
+ *   ?mode=start|hud|buy|pause|matchend|scoreboard|died|banner|lowhp|clickstart|buyclick|pauseclick
+ *   ?debug=1   show the self-check JSON on screen
+ * ========================================================================= */
+(function () {
+  'use strict';
+  var CS = window.CS;
+  var params = new URLSearchParams(window.location.search);
+  var MODE = params.get('mode') || 'start';
+  var DEBUG = params.get('debug') === '1';
+  var errors = [];
+  var calls = [];
+
+  window.addEventListener('error', function (e) {
+    errors.push('window.error: ' + (e && e.message ? e.message : e));
+  });
+  var origError = console.error;
+  console.error = function () {
+    errors.push('console.error: ' + Array.prototype.slice.call(arguments).map(String).join(' '));
+    origError.apply(console, arguments);
+  };
+
+  /* -------------------------- stub weapon defs ------------------------- */
+  CS.weapons = CS.weapons || {};
+  CS.weapons.defs = {
+    knife: { id: 'knife', name: '匕首', slot: 'knife', price: 0, damage: 55, headshot: 1.6, rpm: 120, mag: null, reserve: null, range: 2, auto: false, reloadTime: 0 },
+    usp: { id: 'usp', name: 'USP-S', slot: 'secondary', price: 200, damage: 30, headshot: 3.2, rpm: 350, mag: 12, reserve: 100, range: 55, auto: false, reloadTime: 2.2 },
+    glock: { id: 'glock', name: 'Glock-18', slot: 'secondary', price: 200, damage: 26, headshot: 3.0, rpm: 400, mag: 20, reserve: 120, range: 60, auto: false, reloadTime: 2.0 },
+    m4a1: { id: 'm4a1', name: 'M4A1-S', slot: 'primary', price: 2900, damage: 33, headshot: 3.8, rpm: 600, mag: 30, reserve: 90, range: 80, auto: true, reloadTime: 3.1 },
+    ak47: { id: 'ak47', name: 'AK-47', slot: 'primary', price: 2700, damage: 36, headshot: 3.9, rpm: 600, mag: 30, reserve: 90, range: 80, auto: true, reloadTime: 2.9 },
+    awp: { id: 'awp', name: 'AWP', slot: 'primary', price: 4750, damage: 115, headshot: 1.5, rpm: 41, mag: 10, reserve: 30, range: 120, auto: false, reloadTime: 3.7 }
+  };
+
+  /* --------------------------- stub game ------------------------------- */
+  var game = {
+    canvas: null, renderer: null, world: null, hud: CS.hud, audio: CS.audio, fx: null,
+    bots: [], player: null, rules: null,
+    time: 0, dt: 0, frame: 0, running: true, started: false, paused: false,
+    settings: { sensitivity: 1.2, difficulty: 'normal', volume: 0.8, fov: 90 },
+    input: {
+      keys: {}, mouseDown: false, mouseDX: 0, mouseDY: 0, pressed: {},
+      locked: false, rightDown: false, rightPressed: false
+    },
+    events: [],
+    emit: function (e) { this.events.push(e); },
+    saveSettings: function () { calls.push('saveSettings'); },
+    setDifficulty: function (d) { calls.push('setDifficulty:' + d); },
+    callbacks: {
+      start: function () { calls.push('start'); game.started = true; game.paused = false; CS.hud.hideStart(); },
+      resume: function () { calls.push('resume'); game.paused = false; CS.hud.showPause(false); },
+      restart: function () { calls.push('restart'); game.started = true; game.paused = false; CS.hud.hideStart(); CS.hud.reset(); },
+      lockPointer: function () { calls.push('lockPointer'); game.paused = false; CS.hud.showPause(false); },
+      requestPause: function () { calls.push('requestPause'); game.paused = true; }
+    }
+  };
+
+  var mkBots = function () {
+    var ct = ['Rex', 'Nova', 'Falcon', 'Echo'];
+    var t = ['Viper', 'Boris', 'Kane', 'Yuri', 'Stitch'];
+    var out = [];
+    var kd = { Rex: [6, 3, true], Nova: [4, 5, true], Falcon: [2, 6, false], Echo: [1, 7, false],
+               Viper: [7, 2, true], Boris: [5, 4, true], Kane: [3, 5, true], Yuri: [2, 6, false], Stitch: [1, 7, false] };
+    var i;
+    for (i = 0; i < ct.length; i++) {
+      out.push({ id: 'bot_ct_' + i, name: ct[i], team: 'ct', pos: [0, 0, -20], yaw: 0, health: 100, armor: 100, alive: kd[ct[i]][2], kills: kd[ct[i]][0], deaths: kd[ct[i]][1] });
+    }
+    for (i = 0; i < t.length; i++) {
+      out.push({ id: 'bot_t_' + i, name: t[i], team: 't', pos: [8, 0, 6], yaw: 0, health: kd[t[i]][2] ? 100 : 0, armor: kd[t[i]][2] ? 100 : 0, alive: kd[t[i]][2], kills: kd[t[i]][0], deaths: kd[t[i]][1] });
+    }
+    return out;
+  };
+
+  var player = {
+    pos: [0, 0, -26], vel: [0, 0, 0], yaw: 0.35, pitch: -0.02,
+    health: 87, armor: 65, alive: true, onGround: true, crouching: false, walking: false,
+    team: 'ct', name: '你',
+    loadout: { primary: 'ak47', secondary: 'usp', knife: 'knife' },
+    current: 'ak47',
+    def: CS.weapons.defs.ak47,
+    ammo: { ak47: { mag: 24, reserve: 60 }, usp: { mag: 12, reserve: 100 } },
+    reloading: false, reloadT: 0, drawT: 0, viewKick: 0, bobT: 0, stepT: 0,
+    kills: 7, deaths: 3, crosshairSpread: 0.35, scoped: false, fov: 90,
+    currentDef: function () { return CS.weapons.defs[this.current] || CS.weapons.defs.ak47; },
+    eye: function () { return [this.pos[0], this.pos[1] + 1.62, this.pos[2]]; }
+  };
+
+  var rules = {
+    state: {
+      phase: 'live', phaseTime: 0, round: 5,
+      score: { ct: 4, t: 2 }, money: 2450, buyTimeLeft: 12, roundTimeLeft: 78,
+      canBuy: true, winner: null, reason: '', matchWinner: null
+    },
+    buy: function (g, id) {
+      var st = this.state;
+      if (!st.canBuy) return { ok: false, msg: '当前阶段无法购买' };
+      if (id === 'armor') {
+        if (g.player.armor >= 100) return { ok: false, msg: '已拥有护甲' };
+        if (st.money < 650) return { ok: false, msg: '资金不足' };
+        st.money -= 650; g.player.armor = 100;
+        return { ok: true, msg: '已购买 护甲 + 头盔' };
+      }
+      var def = CS.weapons.defs[id];
+      if (!def) return { ok: false, msg: '未知物品' };
+      if (g.player.loadout.primary === id) return { ok: false, msg: '已拥有 ' + def.name };
+      if (st.money < def.price) return { ok: false, msg: '资金不足：' + def.name + ' $' + def.price };
+      st.money -= def.price;
+      g.player.loadout.primary = id;
+      g.player.current = id;
+      g.player.def = def;
+      g.player.ammo[id] = { mag: def.mag, reserve: def.reserve };
+      return { ok: true, msg: '已购买 ' + def.name };
+    }
+  };
+
+  game.bots = mkBots();
+  game.player = player;
+  game.rules = rules;
+  CS.game = game;
+  CS.rules = rules;
+
+  /* --------------------------- start screen ---------------------------- */
+  /* note: CS.hud.init shows the start screen by default, exactly like main */
+  CS.hud.init(game);
+
+  function hideStart() { game.started = true; CS.hud.hideStart(); }
+
+  /* --------------------------- scenarios ------------------------------- */
+  var killFeedTimer = null;
+  var feedIdx = 0;
+  var feedData = [
+    { killer: game.bots[4], victim: game.bots[0], weapon: 'ak47', headshot: false },
+    { killer: player, victim: game.bots[5], weapon: 'ak47', headshot: true },
+    { killer: game.bots[8], victim: game.bots[2], weapon: 'awp', headshot: true },
+    { killer: player, victim: game.bots[7], weapon: 'ak47', headshot: false }
+  ];
+  function armKillFeed() {
+    var push = function () {
+      var ev = feedData[feedIdx % feedData.length];
+      feedIdx++;
+      CS.hud.onEvent({ type: 'kill', killer: ev.killer, victim: ev.victim, weapon: ev.weapon, headshot: ev.headshot });
+    };
+    push();
+    push();
+    killFeedTimer = setInterval(push, 1600);
+  }
+
+  switch (MODE) {
+    case 'start':
+      break;
+
+    case 'hud':
+      hideStart();
+      armKillFeed();
+      break;
+
+    case 'buy':
+      rules.state.phase = 'buy';
+      rules.state.buyTimeLeft = 6;
+      rules.state.roundTimeLeft = 115;
+      rules.state.canBuy = true;
+      rules.state.money = 3200;
+      player.loadout.primary = null;
+      player.current = 'usp';
+      player.def = CS.weapons.defs.usp;
+      player.armor = 20;
+      hideStart();
+      game.input.pressed.buy = true;
+      break;
+
+    case 'pause':
+      hideStart();
+      game.paused = true;
+      CS.hud.showPause(true);
+      break;
+
+    case 'matchend':
+      hideStart();
+      rules.state.phase = 'matchEnd';
+      rules.state.score = { ct: 8, t: 5 };
+      rules.state.matchWinner = 'ct';
+      game.paused = true;
+      CS.hud.showMatchEnd('ct');
+      break;
+
+    case 'scoreboard':
+      hideStart();
+      armKillFeed();
+      game.input.keys['Tab'] = true;
+      break;
+
+    case 'died':
+      hideStart();
+      player.alive = false;
+      player.health = 0;
+      player.armor = 0;
+      CS.hud.onEvent({ type: 'kill', killer: game.bots[4], victim: player, weapon: 'ak47', headshot: true });
+      break;
+
+    case 'banner':
+      hideStart();
+      CS.hud.banner('第 5 回合', '击杀所有敌人以赢下回合', 999);
+      break;
+
+    case 'lowhp':
+      hideStart();
+      player.health = 18;
+      player.armor = 0;
+      CS.hud.banner('第 5 回合', '击杀所有敌人以赢下回合', 999);
+      break;
+
+    case 'toast':
+      hideStart();
+      CS.hud.toast('资金不足：AWP $4750', 9999);
+      break;
+
+    case 'hitfx':
+      hideStart();
+      setInterval(function () {
+        CS.hud.onEvent({ type: 'hitmarker', headshot: true, kill: false });
+      }, 250);
+      setInterval(function () {
+        CS.hud.onEvent({ type: 'damage', target: player, attacker: game.bots[4], amount: 27, zone: 'body', weapon: 'ak47' });
+      }, 750);
+      armKillFeed();
+      break;
+
+    case 'audio':
+      hideStart();
+      (function () {
+        try {
+          CS.audio.init();
+          CS.audio.setVolume(0.8);
+          CS.audio.setListener(player.eye(), player.yaw);
+          var names = ['ak47', 'm4a1', 'awp', 'glock', 'usp', 'knife_swing', 'knife_hit',
+            'reload_start', 'reload_end', 'switch', 'empty', 'step', 'hit', 'headshot',
+            'hurt', 'kill_confirm', 'round_start', 'win', 'lose', 'buy', 'beep', 'tick'];
+          for (var i = 0; i < names.length; i++) {
+            CS.audio.play(names[i], { pos: [4, 0, 2], volume: 1, rate: 1 });
+          }
+          CS.audio.onEvent({ type: 'shot', weapon: 'ak47', pos: [3, 1, 1], byPlayer: true });
+          CS.audio.onEvent({ type: 'step', pos: [1, 0, 0], byPlayer: false });
+          CS.audio.onEvent({ type: 'damage', target: player, attacker: game.bots[4], amount: 20, zone: 'body', weapon: 'ak47' });
+          CS.audio.onEvent({ type: 'damage', target: game.bots[4], attacker: player, amount: 30, zone: 'head', weapon: 'ak47' });
+          CS.audio.onEvent({ type: 'kill', killer: player, victim: game.bots[4], weapon: 'ak47', headshot: true });
+          CS.audio.onEvent({ type: 'roundStart', round: 5 });
+          CS.audio.onEvent({ type: 'roundEnd', winner: 'ct' });
+          CS.audio.onEvent({ type: 'buy', itemId: 'ak47', ok: true });
+          CS.audio.onEvent({ type: 'empty' });
+          CS.audio.suspend();
+          CS.audio.resume();
+        } catch (err) {
+          errors.push('audio api threw: ' + (err && err.message ? err.message : err));
+        }
+      })();
+      break;
+
+    case 'clickstart':
+      setTimeout(function () {
+        var b = document.getElementById('ds-start-btn');
+        if (b) b.click();
+      }, 700);
+      break;
+
+    case 'settings':
+      setTimeout(function () {
+        var hard = document.querySelector('#ds-diff button[data-diff="hard"]');
+        if (hard) hard.click();
+        var sens = document.getElementById('ds-sens');
+        if (sens) { sens.value = '2.4'; sens.dispatchEvent(new Event('input', { bubbles: true })); }
+        var vol = document.getElementById('ds-vol');
+        if (vol) { vol.value = '0.55'; vol.dispatchEvent(new Event('input', { bubbles: true })); }
+      }, 700);
+      break;
+
+    case 'audiodead':
+      /* simulate a browser without WebAudio: everything must degrade silently */
+      hideStart();
+      (function () {
+        try {
+          window.AudioContext = undefined;
+          window.webkitAudioContext = undefined;
+          CS.audio.init();
+          CS.audio.init();                       /* repeated init must be safe */
+          CS.audio.play('ak47', { pos: [1, 0, 0] });
+          CS.audio.play('win');
+          CS.audio.onEvent({ type: 'shot', weapon: 'awp', pos: [2, 0, 1], byPlayer: false });
+          CS.audio.onEvent({ type: 'roundStart', round: 1 });
+          CS.audio.setListener([0, 0, 0], 0);
+          CS.audio.setVolume(0.7);
+          CS.audio.suspend();
+          CS.audio.resume();
+        } catch (err) {
+          errors.push('audiodead threw: ' + (err && err.message ? err.message : err));
+        }
+      })();
+      break;
+
+    case 'minimal':
+      /* very incomplete player: HUD must fall back without throwing */
+      hideStart();
+      game.player = {
+        pos: [0, 0, 0], yaw: 0, health: 60, armor: 0, alive: true, team: 'ct', name: '你'
+      };
+      rules.state = { phase: 'live', round: 2, score: { ct: 1, t: 0 }, roundTimeLeft: 100 };
+      break;
+
+    case 'scoped':
+      hideStart();
+      player.scoped = true;
+      break;
+
+    case 'scopedbuy':
+      rules.state.phase = 'buy';
+      rules.state.buyTimeLeft = 6;
+      rules.state.roundTimeLeft = 115;
+      rules.state.canBuy = true;
+      rules.state.money = 3200;
+      player.scoped = true;
+      hideStart();
+      game.input.pressed.buy = true;
+      break;
+
+    case 'scopedpause':
+      hideStart();
+      player.scoped = true;
+      game.paused = true;
+      CS.hud.showPause(true);
+      break;
+
+    case 'scopeddeath':
+      hideStart();
+      player.scoped = true;
+      player.alive = false;
+      player.health = 0;
+      CS.hud.onEvent({ type: 'kill', killer: game.bots[4], victim: player, weapon: 'awp', headshot: true });
+      break;
+
+    case 'buyclick':
+      rules.state.phase = 'buy';
+      rules.state.buyTimeLeft = 6;
+      rules.state.canBuy = true;
+      rules.state.money = 3200;
+      player.loadout.primary = null;
+      player.current = 'usp';
+      player.def = CS.weapons.defs.usp;
+      player.armor = 20;
+      hideStart();
+      game.input.pressed.buy = true;
+      /* click the AK card as soon as the menu is actually open (polling timer
+         is robust under headless virtual time; rAF may only run a few frames) */
+      (function () {
+        var tries = 0;
+        var iv = setInterval(function () {
+          tries++;
+          if (window.__buyClicked) { clearInterval(iv); return; }
+          if (CS.hud.isBuyMenuOpen()) {
+            window.__buyClicked = true;
+            var card = document.querySelector('#ds-buy-cards .ds-card[data-item="ak47"]');
+            if (card) card.click();
+            clearInterval(iv);
+            return;
+          }
+          if (tries > 80) clearInterval(iv);
+        }, 40);
+      })();
+      break;
+
+    case 'pauseclick':
+      hideStart();
+      game.paused = true;
+      CS.hud.showPause(true);
+      setTimeout(function () {
+        var b = document.getElementById('ds-resume-btn');
+        if (b) b.click();
+      }, 700);
+      break;
+
+    default:
+      break;
+  }
+
+  /* ------------------------- frame loop -------------------------------- */
+  var last = (window.performance && performance.now ? performance.now() : Date.now());
+  function frame(nowMs) {
+    var dt = Math.min(0.05, Math.max(0, (nowMs - last) / 1000));
+    last = nowMs;
+    game.time += dt;
+    game.dt = dt;
+    game.frame++;
+    try {
+      CS.hud.update(game, dt);
+    } catch (err) {
+      errors.push('hud.update threw: ' + (err && err.stack ? err.stack : err));
+    }
+    if (MODE === 'buyclick' && !window.__buyClicked && game.frame > 20 && CS.hud.isBuyMenuOpen()) {
+      window.__buyClicked = true;
+      var buyCard = document.querySelector('#ds-buy-cards .ds-card[data-item="ak47"]');
+      if (buyCard) buyCard.click();
+    }
+    game.input.pressed = {};
+    game.input.mouseDX = 0;
+    game.input.mouseDY = 0;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  /* ------------------------- self check -------------------------------- */
+  function rectOf(el) {
+    if (!el) return null;
+    var r = el.getBoundingClientRect();
+    var cs = getComputedStyle(el);
+    return {
+      shown: cs.display !== 'none' && cs.visibility !== 'hidden',
+      x: Math.round(r.left), y: Math.round(r.top),
+      w: Math.round(r.width), h: Math.round(r.height),
+      right: Math.round(r.right), bottom: Math.round(r.bottom),
+      pe: cs.pointerEvents
+    };
+  }
+  function selfCheck() {
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var res = {
+      mode: MODE, viewport: [vw, vh], ok: true, issues: [], errors: errors, calls: calls,
+      money: rules.state.money,
+      loadoutPrimary: player.loadout ? player.loadout.primary : null,
+      settings: { difficulty: game.settings.difficulty, sensitivity: game.settings.sensitivity, volume: game.settings.volume },
+      audio: {
+        available: CS.audio.isAvailable(),
+        ready: CS.audio.isReady(),
+        volume: CS.audio.getVolume()
+      },
+      blockingInput: CS.hud.isBlockingInput(),
+      buyMenuOpen: CS.hud.isBuyMenuOpen(),
+      startOpen: (function () { var el = document.getElementById('ds-start'); return !!el && getComputedStyle(el).display !== 'none'; })(),
+      elements: {}
+    };
+    var ids = ['ds-top', 'ds-killfeed', 'ds-vitals', 'ds-ammo', 'ds-crosshair', 'ds-hitmarker',
+      'ds-death', 'ds-banner', 'ds-start', 'ds-pause', 'ds-buy', 'ds-matchend', 'ds-scoreboard',
+      'ds-toast', 'ds-buytip', 'ds-scope'];
+    var i, id, el, r;
+    for (i = 0; i < ids.length; i++) {
+      id = ids[i];
+      el = document.getElementById(id);
+      r = rectOf(el);
+      if (!r) { res.issues.push('missing #' + id); res.ok = false; continue; }
+      res.elements[id] = r;
+      if (r.shown && (r.right > vw + 1 || r.bottom > vh + 1 || r.x < -1 || r.y < -1)) {
+        res.ok = false;
+        res.issues.push('#' + id + ' overflows viewport: ' + JSON.stringify([r.x, r.y, r.w, r.h]));
+      }
+    }
+    /* gameplay layers must not overlap each other */
+    var boxes = ['ds-top', 'ds-killfeed', 'ds-vitals', 'ds-ammo', 'ds-buytip'];
+    for (i = 0; i < boxes.length; i++) {
+      for (var j = i + 1; j < boxes.length; j++) {
+        var a = res.elements[boxes[i]], b = res.elements[boxes[j]];
+        if (!a || !b || !a.shown || !b.shown) continue;
+        var ix = Math.max(0, Math.min(a.right, b.right) - Math.max(a.x, b.x));
+        var iy = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.y, b.y));
+        if (ix * iy > 200) {
+          res.ok = false;
+          res.issues.push('overlap ' + boxes[i] + ' <-> ' + boxes[j] + ' (' + ix + 'x' + iy + ')');
+        }
+      }
+    }
+    /* modal panels must fit */
+    var panels = document.querySelectorAll('.ds-start-inner, .ds-modal');
+    for (i = 0; i < panels.length; i++) {
+      el = panels[i];
+      if (!el.offsetParent && getComputedStyle(el).position !== 'fixed') continue;
+      r = rectOf(el);
+      if (r && r.shown && (r.bottom > vh + 1 || r.x < -1 || r.y < -1 || r.right > vw + 1)) {
+        res.ok = false;
+        res.issues.push('panel overflows: ' + (el.className || '') + ' ' + JSON.stringify([r.x, r.y, r.w, r.h]));
+      }
+    }
+    /* pointer-events contract */
+    var hudEl = document.getElementById('ds-hud');
+    res.hudPointerEvents = hudEl ? getComputedStyle(hudEl).pointerEvents : null;
+    if (res.hudPointerEvents !== 'none') { res.ok = false; res.issues.push('hud root pointer-events != none'); }
+    var startEl = document.getElementById('ds-start');
+    if (startEl && getComputedStyle(startEl).display !== 'none') {
+      var pe = getComputedStyle(startEl).pointerEvents;
+      if (pe !== 'auto') { res.ok = false; res.issues.push('start overlay pointer-events != auto'); }
+    }
+    /* mode specific expectations */
+    var show = function (id) { return res.elements[id] && res.elements[id].shown; };
+    if (MODE === 'start' && !res.startOpen) { res.ok = false; res.issues.push('start mode: start screen not open'); }
+    if (MODE === 'hud' && res.startOpen) { res.ok = false; res.issues.push('hud mode: start screen still open'); }
+    if ((MODE === 'hud' || MODE === 'lowhp') && !show('ds-top')) { res.ok = false; res.issues.push('gameplay HUD not visible'); }
+    if (MODE === 'buy' && !show('ds-buy')) { res.ok = false; res.issues.push('buy menu not visible'); }
+    if (MODE === 'pause' && !show('ds-pause')) { res.ok = false; res.issues.push('pause menu not visible'); }
+    if (MODE === 'matchend' && !show('ds-matchend')) { res.ok = false; res.issues.push('match end not visible'); }
+    if (MODE === 'scoreboard' && !show('ds-scoreboard')) { res.ok = false; res.issues.push('scoreboard not visible'); }
+    if (MODE === 'died' && !show('ds-death')) { res.ok = false; res.issues.push('death overlay not visible'); }
+    if (MODE === 'clickstart') {
+      if (res.startOpen) { res.ok = false; res.issues.push('clickstart: start still open'); }
+      if (calls.indexOf('start') < 0) { res.ok = false; res.issues.push('clickstart: start callback not called'); }
+    }
+    if (MODE === 'buyclick') {
+      if (calls.indexOf('requestPause') < 0) { res.ok = false; res.issues.push('buyclick: requestPause not called'); }
+      if (calls.indexOf('lockPointer') < 0) { res.ok = false; res.issues.push('buyclick: lockPointer not called'); }
+      if (player.loadout.primary !== 'ak47' || rules.state.money !== 500) {
+        res.ok = false;
+        res.issues.push('buyclick: purchase not applied (' + player.loadout.primary + ', $' + rules.state.money + ')');
+      }
+    }
+    if (MODE === 'pauseclick') {
+      if (calls.indexOf('resume') < 0) { res.ok = false; res.issues.push('pauseclick: resume callback not called'); }
+      if (show('ds-pause') && !game.paused) { res.ok = false; res.issues.push('pauseclick: pause menu stuck'); }
+    }
+    /* blocking-input contract per mode */
+    var expectBlocking = {
+      start: true, hud: false, buy: true, pause: true, matchend: true,
+      scoreboard: false, died: false, banner: false, lowhp: false,
+      clickstart: false, buyclick: false, pauseclick: false,
+      hitfx: false, toast: false, audio: false, settings: true,
+      audiodead: false, minimal: false, scoped: false, scopedbuy: true,
+      scopedpause: true, scopeddeath: false
+    };
+    if (expectBlocking.hasOwnProperty(MODE) && res.blockingInput !== expectBlocking[MODE]) {
+      res.ok = false;
+      res.issues.push('isBlockingInput=' + res.blockingInput + ' expected ' + expectBlocking[MODE]);
+    }
+    if ((MODE === 'buy' || MODE === 'buyclick') && !res.buyMenuOpen && MODE === 'buy') {
+      res.ok = false;
+      res.issues.push('isBuyMenuOpen false while buy mode');
+    }
+    if (MODE === 'settings') {
+      if (res.settings.difficulty !== 'hard' || Math.abs(res.settings.sensitivity - 2.4) > 0.001 ||
+          Math.abs(res.settings.volume - 0.55) > 0.001) {
+        res.ok = false;
+        res.issues.push('settings not applied: ' + JSON.stringify(res.settings));
+      }
+      if (calls.indexOf('saveSettings') < 0) { res.ok = false; res.issues.push('saveSettings not called'); }
+      if (calls.indexOf('setDifficulty:hard') < 0) { res.ok = false; res.issues.push('setDifficulty(hard) not called'); }
+    }
+    if (MODE === 'audio' && !res.audio.ready && res.audio.available) {
+      /* AudioContext exists but could not be created => silent degradation is fine,
+         only a hard crash would set errors (checked below). */
+    }
+    if (MODE === 'audiodead') {
+      if (res.audio.available || res.audio.ready) {
+        res.ok = false;
+        res.issues.push('audiodead: expected silent degradation, got available=' + res.audio.available + ' ready=' + res.audio.ready);
+      }
+    }
+    if (MODE === 'minimal' && !show('ds-top')) {
+      res.ok = false;
+      res.issues.push('minimal: HUD not rendered with partial player');
+    }
+    if (MODE === 'scoped') {
+      if (!show('ds-scope')) { res.ok = false; res.issues.push('scoped: scope overlay not visible'); }
+      if (show('ds-crosshair')) { res.ok = false; res.issues.push('scoped: normal crosshair still visible'); }
+      var lens = document.querySelector('.ds-scope-lens');
+      var lr = lens ? lens.getBoundingClientRect() : null;
+      if (!lr || lr.width < 300) {
+        res.ok = false;
+        res.issues.push('scoped: scope lens too small/absent: ' + (lr ? lr.width : 'null'));
+      } else {
+        var cx = lr.left + lr.width / 2, cy = lr.top + lr.height / 2;
+        if (Math.abs(cx - vw / 2) > 3 || Math.abs(cy - vh / 2) > 3) {
+          res.ok = false; res.issues.push('scoped: lens not centered');
+        }
+        if (Math.abs(lr.width - lr.height) > 2) {
+          res.ok = false; res.issues.push('scoped: lens not circular');
+        }
+      }
+      res.scope = { shown: show('ds-scope'), lens: lr ? [Math.round(lr.width), Math.round(lr.height)] : null };
+    }
+    if (MODE === 'scopedbuy') {
+      if (show('ds-scope')) { res.ok = false; res.issues.push('scopedbuy: scope overlay not hidden under buy menu'); }
+      if (!show('ds-buy')) { res.ok = false; res.issues.push('scopedbuy: buy menu not visible'); }
+      res.scope = { shown: show('ds-scope') };
+    }
+    if (MODE === 'scopedpause') {
+      if (show('ds-scope')) { res.ok = false; res.issues.push('scopedpause: scope overlay not hidden under pause menu'); }
+      if (!show('ds-pause')) { res.ok = false; res.issues.push('scopedpause: pause menu not visible'); }
+    }
+    if (MODE === 'scopeddeath') {
+      if (show('ds-scope')) { res.ok = false; res.issues.push('scopeddeath: scope overlay not removed on death'); }
+      if (!show('ds-death')) { res.ok = false; res.issues.push('scopeddeath: death overlay not visible'); }
+    }
+    if (MODE === 'died') {
+      /* died mode: scope must be removed together with the death overlay */
+      if (show('ds-scope')) { res.ok = false; res.issues.push('died: scope visible while dead'); }
+    }
+    if (errors.length) { res.ok = false; res.issues.push('runtime errors: ' + errors.join(' ; ')); }
+    document.getElementById('__selfcheck').textContent = '__SELFCHECK__' + JSON.stringify(res);
+    window.__SELFCHECK__ = res;
+    if (DEBUG) {
+      var dbg = document.getElementById('dbg');
+      dbg.style.display = 'block';
+      dbg.textContent = '__SELFCHECK__ ' + JSON.stringify(res, null, 1);
+    }
+  }
+  setTimeout(selfCheck, 2200);
+
+  window.__GAME__ = game;
+  window.__MODE__ = MODE;
+})();
+</script>
+</body>
+</html>

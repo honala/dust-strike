@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CS.gl no-GL fallback test</title>
+<style>body{background:#101216;color:#cfe;font:13px/1.5 Consolas,monospace;margin:16px} .ok{color:#7f7} .fail{color:#f66}</style>
+</head>
+<body>
+<canvas id="c" width="320" height="180"></canvas>
+<pre id="out">boot</pre>
+<script src="../js/math.js"></script>
+<script src="../js/glcore.js"></script>
+<script src="../js/fx.js"></script>
+<script>
+(function () {
+  'use strict';
+  var lines = [];
+  var failures = 0;
+  function check(name, fn) {
+    try {
+      fn();
+      lines.push('OK   ' + name);
+    } catch (e) {
+      failures++;
+      lines.push('FAIL ' + name + ': ' + e.message);
+    }
+  }
+  var R = null;
+
+  /* Occupy the canvas with a 2d context first: spec says a canvas can only
+     have one context type, so getContext('webgl') will return null. */
+  var canvas = document.getElementById('c');
+  canvas.getContext('2d').fillRect(0, 0, 10, 10);
+
+  check('CS.gl.init -> inert renderer', function () {
+    R = CS.gl.init(canvas);
+    if (!R) throw new Error('init returned nothing');
+    if (!R.isNull) throw new Error('expected isNull renderer');
+    if (R.gl !== null) throw new Error('expected gl === null');
+  });
+  check('renderer.gl exists', function () { if (!('gl' in R)) throw new Error('missing gl'); });
+  check('renderer.camera exists', function () {
+    var c = R.camera;
+    if (!c || !c.eye || !c.view) throw new Error('bad camera');
+  });
+  check('resize', function () { R.resize(); });
+  check('setCamera', function () { R.setCamera([1, 2, 3], 0.5, 0.2, 90); });
+  check('beginFrame(opts)', function () {
+    R.beginFrame({ skyTop: [0.4, 0.5, 0.6], skyBottom: '#eedcb0', fogColor: [0.8, 0.7, 0.5], fogNear: 10, fogFar: 90 });
+  });
+  check('CS.gl.createMesh arrays', function () {
+    var m = CS.gl.createMesh(
+      new Float32Array([0, 0, 0, 0, 1, 0, 0, 0]),
+      new Uint16Array([0, 0, 0]), 'sandfloor');
+    if (!m) throw new Error('no mesh');
+  });
+  check('drawMesh', function () {
+    var m = CS.gl.createMesh(new Float32Array(8), new Uint16Array(3), 'wall');
+    R.drawMesh(m);
+    R.drawMesh(null);
+  });
+  check('drawBox', function () {
+    var m = CS.math.M4.translation(1, 2, 3);
+    R.drawBox('crate', m, [0.5, 0.6, 0.7], 1.5);
+    R.drawBox('nope-unknown-texture', m, null, undefined);
+  });
+  check('drawBeam', function () { R.drawBeam([0, 0, 0], [1, 2, 3], 0.05, [1, 0.8, 0.4]); });
+  check('drawSprite', function () { R.drawSprite('spark', [0, 1, 0], 0.5, [1, 1, 1, 0.8], true); });
+  check('drawShadow', function () { R.drawShadow([0, 0, 0], 0.5, 0.4); });
+  check('drawGroundDecal', function () { R.drawGroundDecal([0, 0, 0], 3, [1, 0.5, 0.1]); });
+  check('drawDecal', function () { R.drawDecal('decalhole', [0, 0, 0], [0, 0, 1], 0.15, [1, 1, 1], 1, 0); });
+  check('endFrame', function () { R.endFrame(); });
+  check('stats sane', function () {
+    if (!R.stats) throw new Error('no stats');
+    if (R.stats.draws !== 0) throw new Error('expected 0 draws, got ' + R.stats.draws);
+  });
+
+  /* fx on top of the inert renderer (and with no init at all) */
+  check('fx.init(null renderer)', function () { CS.fx.init(R); });
+  check('fx spawns', function () {
+    CS.fx.tracer([0, 1, 0], [1, 1, -5], [1, 0.8, 0.5]);
+    CS.fx.impact([0, 1, -5], [0, 0, 1], 'wall');
+    CS.fx.muzzle([0, 1.5, 0], [0, 0, -1], 1);
+    CS.fx.blood([0, 1.5, -3], [0, 0, -1]);
+    CS.fx.shell([0, 1.2, 0], [1, 0.5, 0]);
+  });
+  check('fx.update', function () { for (var i = 0; i < 30; i++) CS.fx.update(0.016); });
+  check('fx.render', function () { CS.fx.render(R); CS.fx.render(); });
+  check('fx.clear', function () { CS.fx.clear(); });
+  check('fx before init', function () {
+    CS.fx.init(null);
+    CS.fx.tracer([0, 0, 0], [1, 0, 0]);
+    CS.fx.impact([0, 0, 0], null, null);
+    CS.fx.update(0.016);
+    CS.fx.render(null);
+    CS.fx.clear();
+  });
+
+  /* extreme argument robustness */
+  check('bad args do not throw', function () {
+    R.drawBox(undefined, null, null, null);
+    R.drawBeam(null, null, null, null);
+    R.drawSprite(null, null, null, null, null);
+    R.drawShadow(null, null, null);
+    R.drawGroundDecal(null, null, null);
+    R.drawDecal(null, null, null, null, null, null, null);
+    R.drawMesh(undefined);
+    R.setCamera(null, NaN, undefined, 0);
+    R.beginFrame(null);
+    R.endFrame();
+  });
+
+  var out = document.getElementById('out');
+  out.innerHTML = lines.map(function (l) {
+    return '<span class="' + (l.indexOf('FAIL') === 0 ? 'fail' : 'ok') + '">' + l + '</span>';
+  }).join('\n') + '\n\n' + (failures ? (failures + ' FAILURES') : 'ALL PASS');
+  document.title = failures ? ('NOGL FAIL ' + failures) : 'NOGL PASS';
+})();
+</script>
+</body>
+</html>

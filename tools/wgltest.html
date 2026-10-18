@@ -1,0 +1,23 @@
+﻿<!DOCTYPE html><html><head><meta charset="utf-8"><title>wgltest</title></head>
+<body style="margin:0;background:#111">
+<canvas id="c" width="640" height="360"></canvas>
+<div id="out" style="color:#0f0;font:16px monospace"></div>
+<script>
+try{
+  var c=document.getElementById('c');
+  var gl=c.getContext('webgl2')||c.getContext('webgl');
+  var out=document.getElementById('out');
+  if(!gl){document.title='NOGL';out.textContent='NOGL';}
+  else{
+    var vs='attribute vec2 p;void main(){gl_Position=vec4(p,0.0,1.0);}';
+    var fs='precision mediump float;void main(){gl_FragColor=vec4(0.2,0.9,0.3,1.0);}';
+    function sh(t,s){var x=gl.createShader(t);gl.shaderSource(x,s);gl.compileShader(x);return x;}
+    var pr=gl.createProgram();gl.attachShader(pr,sh(gl.VERTEX_SHADER,vs));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,fs));gl.linkProgram(pr);gl.useProgram(pr);
+    var b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-0.8,-0.8,0.8,-0.8,0,0.9]),gl.STATIC_DRAW);
+    var l=gl.getAttribLocation(pr,'p');gl.enableVertexAttribArray(l);gl.vertexAttribPointer(l,2,gl.FLOAT,false,0,0);
+    gl.clearColor(0.1,0.12,0.16,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.drawArrays(gl.TRIANGLES,0,3);
+    var ver=gl.getParameter(gl.VERSION);var rend=gl.getParameter(gl.RENDERER);
+    document.title='OK|'+ver;out.textContent='OK '+ver+' | '+rend;
+  }
+}catch(e){document.title='ERR';document.body.textContent='ERR '+e.message;}
+</script></body></html>
